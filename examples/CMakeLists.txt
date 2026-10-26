@@ -1,0 +1,7 @@
+foreach(ex scan sweep sync bulk)
+    add_executable(dxl_${ex} ${ex}/main.c)
+    target_compile_options(dxl_${ex} PRIVATE -Wall -Wextra)
+    target_link_libraries(dxl_${ex} pico_stdlib pico2_dynamixel)
+    pico_enable_stdio_usb(dxl_${ex} 1)
+    pico_add_extra_outputs(dxl_${ex})
+endforeach()

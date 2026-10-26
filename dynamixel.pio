@@ -1,0 +1,55 @@
+; Half-duplex UART for Dynamixel on a single pin, one state machine.
+;
+; 8 PIO cycles per bit (clkdiv = clk_sys / (8 * baud)): the [n] delays make
+; every bit exactly 8 cycles, so retime them together. All pin bases
+; (set/out/in/jmp/side-set) are the data pin.
+;
+; Side-set drives the pin *direction*: side 1 takes the bus, side 0 releases
+; it to the pull-up. The output value is high whenever the bus is released
+; (dxl_init() presets it, every stop bit restores it), so taking the bus never
+; glitches a start bit.
+;
+; The CPU restarts the SM at do_tx for every packet: the RX loop sits in
+; `wait` and can't notice the TX FIFO. It sends while the FIFO has data,
+; releases the bus at the very end of the last stop bit (a servo with Return
+; Delay Time 0 answers right away), then receives until the next restart.
+; It never listens while sending, so our own bytes don't echo into RX.
+; The RX code is placed after the TX code: PC >= do_rx means the packet is
+; out and the bus is free (wait_tx_done() relies on this).
+;
+; If TX DMA ever falls a whole FIFO behind, the packet is cut short: the servo
+; sees a bad CRC and the call times out.
+
+.program dxl
+.side_set 1 opt pindirs
+
+public do_tx:
+    pull block          side 1  ; take the bus (pin value preset high)
+tx_byte:
+    set pins, 0     [6]         ; start bit
+    set x, 7
+tx_bit:
+    out pins, 1     [6]         ; data, LSB first
+    jmp x-- tx_bit
+    set pins, 1     [5]         ; stop bit: 6 + 2 cycles with the next two
+    mov y, status               ; ~0 when TX FIFO is empty
+    jmp y-- do_rx               ; nothing queued -> release the bus
+    pull block                  ; back-to-back bytes: stop bit stretches to
+    jmp tx_byte                 ; 10 cycles, which any UART accepts
+
+.wrap_target
+public do_rx:
+    wait 0 pin 0        side 0  ; release bus, wait for start bit
+    set x, 7        [7]
+    nop             [2]         ; 12 cycles = 1.5 bits: middle of bit 0
+rx_bit:
+    in pins, 1
+    jmp x-- rx_bit  [6]
+    jmp pin rx_ok               ; middle of the stop bit: must be high
+    ; Framing error: drop the byte, wait for idle. ISR needn't be cleared:
+    ; the next byte's 8 shifts push the junk out of ISR[31:24].
+    wait 1 pin 0
+    jmp do_rx
+rx_ok:
+    push                        ; byte in ISR[31:24]; RX DMA reads that lane
+.wrap
